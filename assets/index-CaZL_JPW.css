@@ -64,3 +64,5 @@ html, body {
   opacity: 0 !important;
   pointer-events: none !important;
 }
+
+.whatsapp-float{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}
