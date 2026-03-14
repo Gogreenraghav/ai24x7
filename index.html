@@ -17,54 +17,7 @@
     {"@context":"https://schema.org","@type":"Organization","name":"AI24x7","url":"https://ai24x7.cloud","description":"Enterprise AI Solutions","contactPoint":{"@type":"ContactPoint","email":"Info@ai24x7.cloud"}}
     </script>
 
-    <!-- WhatsApp Float Button -->
-    <style>
-      #wa-float {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        z-index: 99999;
-        display: flex;
-        flex-direction: column;
-        align-items: flex-end;
-        gap: 6px;
-        width: auto !important;
-        max-width: 70px !important;
-      }
-      #wa-float.hidden { display: none !important; }
-      #wa-close {
-        background: rgba(0,0,0,0.6);
-        color: white;
-        border: none;
-        border-radius: 50%;
-        width: 18px;
-        height: 18px;
-        font-size: 10px;
-        cursor: pointer;
-        line-height: 1;
-        padding: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        align-self: flex-end;
-      }
-      #wa-btn {
-        width: 56px !important;
-        height: 56px !important;
-        min-width: 56px !important;
-        max-width: 56px !important;
-        border-radius: 50% !important;
-        background: #25D366 !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        box-shadow: 0 4px 20px rgba(37,211,102,0.5) !important;
-        cursor: pointer;
-        text-decoration: none;
-        flex: none !important;
-      }
-      #wa-btn svg { width: 30px; height: 30px; fill: white; display: block; }
-    </style>
+    
 
     <script type="module" crossorigin="" src="./assets/index-GTZa-_IJ.js"></script>
     <link rel="stylesheet" crossorigin="" href="./assets/index-CaZL_JPW.css"/>
@@ -72,13 +25,21 @@
 <body>
     <div id="root"></div>
 
-    <!-- WhatsApp Floating Button -->
-    <div id="wa-float">
-      <button id="wa-close" onclick="document.getElementById('wa-float').classList.add('hidden')" title="Close">✕</button>
-      <a id="wa-btn" href="https://wa.me/919971766177?text=Hi%20AI24x7!%20I%20want%20to%20know%20more%20about%20your%20AI%20solutions." target="_blank" title="Chat on WhatsApp">
-        <svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
-          <path d="M16 0C7.163 0 0 7.163 0 16c0 2.822.737 5.469 2.027 7.77L0 32l8.469-2.001A15.93 15.93 0 0016 32c8.837 0 16-7.163 16-16S24.837 0 16 0zm0 29.333a13.27 13.27 0 01-6.771-1.849l-.486-.289-5.027 1.188 1.234-4.896-.318-.502A13.267 13.267 0 012.667 16C2.667 8.636 8.636 2.667 16 2.667S29.333 8.636 29.333 16 23.364 29.333 16 29.333zm7.27-9.928c-.398-.199-2.355-1.162-2.72-1.295-.366-.133-.632-.199-.898.199-.266.398-1.031 1.295-1.264 1.561-.233.266-.465.299-.863.1-.398-.199-1.681-.619-3.203-1.977-1.184-1.056-1.983-2.361-2.215-2.759-.232-.398-.025-.613.175-.811.18-.178.398-.465.597-.698.199-.233.266-.398.398-.664.133-.266.067-.498-.033-.697-.1-.199-.898-2.166-1.231-2.966-.324-.778-.654-.672-.898-.684-.232-.011-.498-.013-.764-.013s-.697.1-1.063.498c-.366.398-1.396 1.363-1.396 3.324s1.43 3.856 1.629 4.122c.199.266 2.814 4.298 6.818 6.027.953.411 1.697.657 2.277.841.956.305 1.827.262 2.515.159.767-.114 2.355-.963 2.688-1.893.332-.93.332-1.728.232-1.893-.099-.166-.365-.266-.763-.465z"/>
-        </svg>
+    
+
+    <!-- WhatsApp Float -->
+    <style>
+      #wa-fab{position:fixed;bottom:22px;right:22px;z-index:999999;display:flex;flex-direction:column;align-items:center;gap:5px}
+      #wa-fab.gone{display:none}
+      #wa-x{background:rgba(0,0,0,.55);color:#fff;border:none;border-radius:50%;width:20px;height:20px;font-size:11px;cursor:pointer;line-height:20px;text-align:center;padding:0;align-self:flex-end}
+      #wa-link{display:flex;align-items:center;justify-content:center;width:58px;height:58px;border-radius:50%;background:#25D366;box-shadow:0 4px 18px rgba(37,211,102,.55);text-decoration:none}
+      #wa-link img{width:34px;height:34px;display:block}
+    </style>
+    <div id="wa-fab">
+      <button id="wa-x">✕</button>
+      <a id="wa-link" href="https://wa.me/919971766177?text=Hi%20AI24x7!%20I%20want%20to%20know%20more%20about%20your%20AI%20solutions." target="_blank">
+        <img src="https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg" alt="WhatsApp"/>
       </a>
     </div>
+    <script>document.getElementById('wa-x').addEventListener('click',function(){document.getElementById('wa-fab').classList.add('gone')});</script>
 </body></html>
