@@ -48,3 +48,19 @@ html, body {
   /* Tablet/phablet tweaks */
   .max-w-7xl { padding-left: 1rem !important; padding-right: 1rem !important; }
 }
+
+/* Hide green popup widget */
+[class*="whatsapp-widget"],
+[class*="wa-widget"],
+[class*="float-wa"],
+[id*="whatsapp"],
+[id*="wa-btn"],
+[class*="audit-popup"],
+[class*="demo-popup"],
+[class*="popup-overlay"],
+[class*="modal-overlay"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
