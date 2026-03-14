@@ -1,45 +1,146 @@
 <!DOCTYPE html><html lang="en"><head>
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>AI24x7 | Enterprise AI Solutions &amp; Industry Automation Agency</title>
-    <meta name="description" content="AI24x7 delivers advanced AI agents and automation for 20+ industries including Legal, Poultry, Banking, and Retail. High-performance AI infrastructure for Indian enterprises."/>
-    <meta name="keywords" content="AI Solutions India, Custom AI Agents, AI Automation Delhi, Legal Tech AI India, Poultry Management AI, Banking AI Tools, Retail Automation, Enterprise AI Consulting, Workflow Automation, B2B AI Platform, AI Infrastructure, Smart Farming AI, Fintech Solutions, Healthcare AI India"/>
-    <meta name="robots" content="index, follow"/>
-    <meta name="author" content="AI24x7"/>
-    <meta property="og:type" content="website"/>
-    <meta property="og:url" content="https://ai24x7.cloud/"/>
-    <meta property="og:title" content="AI24x7 | Enterprise AI Solutions &amp; Industry Automation Agency"/>
-    <meta property="og:description" content="AI24x7 delivers advanced AI agents and automation for 20+ industries. High-performance AI infrastructure for Indian enterprises."/>
-    <meta name="twitter:card" content="summary_large_image"/>
-    <meta name="twitter:title" content="AI24x7 | Enterprise AI Solutions &amp; Industry Automation Agency"/>
-    <link rel="canonical" href="https://ai24x7.cloud/"/>
-    <script type="application/ld+json">
-    {"@context":"https://schema.org","@type":"Organization","name":"AI24x7","url":"https://ai24x7.cloud","description":"Enterprise AI Solutions","contactPoint":{"@type":"ContactPoint","email":"Info@ai24x7.cloud"}}
-    </script>
-
-    
-
+    <title>AI24x7 - AI Automation Agency</title>
     <script type="module" crossorigin="" src="./assets/index-GTZa-_IJ.js"></script>
     <link rel="stylesheet" crossorigin="" href="./assets/index-CaZL_JPW.css"/>
-</head>
-<body>
+  <script src="" defer=""></script></head>
+  <body>
     <div id="root"></div>
+  
 
-    
+<!-- AI24X7-PATCH v3 -->
+<style>
+/* HOW IT WORKS - Fix steps layout on desktop */
+section[id="how-it-works"] .grid,
+section[id="how-it-works"] [class*="grid-cols"] {
+  display: grid !important;
+  grid-template-columns: repeat(3, 1fr) !important;
+  gap: 2rem !important;
+}
+@media (max-width: 768px) {
+  section[id="how-it-works"] .grid,
+  section[id="how-it-works"] [class*="grid-cols"] {
+    grid-template-columns: 1fr !important;
+  }
+}
+/* Fix opacity/transform hidden steps */
+section[id="how-it-works"] [class*="opacity-0"] {
+  opacity: 1 !important;
+}
+section[id="how-it-works"] [class*="translate-y"] {
+  transform: none !important;
+}
+/* CONTACT - Scrollable form */
+section[id="contact"] {
+  overflow-y: auto !important;
+  height: auto !important;
+  min-height: unset !important;
+}
+section[id="contact"] * {
+  max-height: none !important;
+}
+section[id="contact"] [class*="overflow-hidden"] {
+  overflow-y: auto !important;
+}
+@media (max-width: 768px) {
+  section[id="contact"],
+  section[id="contact"] > div,
+  section[id="contact"] form {
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    height: auto !important;
+  }
+}
+</style>
+<script>
+(function(){
+  function fixes(){
+    /* 1 - VIEW ALL INDUSTRIES */
+    var btn = Array.from(document.querySelectorAll("button")).find(function(b){
+      return b.textContent.includes("View All Industries");
+    });
+    if(btn && !btn._ai24fix){
+      btn._ai24fix=true;
+      btn.addEventListener("click",function(){
+        var sec=document.getElementById("industries");
+        if(sec){
+          /* Remove any hidden/clipped grid rows */
+          sec.querySelectorAll("[class*='grid']").forEach(function(g){
+            g.style.maxHeight="none";
+            g.style.overflow="visible";
+          });
+          /* Show any hidden children */
+          sec.querySelectorAll("[style*='display:none'],[style*='display: none']").forEach(function(el){
+            el.style.display="block";
+          });
+          /* Remove overflow:hidden that clips rows */
+          var p=sec.parentElement;
+          for(var i=0;i<4&&p;i++){
+            if(window.getComputedStyle(p).overflow==="hidden") p.style.overflow="visible";
+            p=p.parentElement;
+          }
+        }
+        btn.innerHTML="All Industries ✓";
+        btn.disabled=true;
+        btn.style.opacity="0.7";
+      });
+    }
 
-    <!-- WhatsApp Float -->
-    <style>
-      #wa-fab{position:fixed;bottom:22px;right:22px;z-index:999999;display:flex;flex-direction:column;align-items:center;gap:5px}
-      #wa-fab.gone{display:none}
-      #wa-x{background:rgba(0,0,0,.55);color:#fff;border:none;border-radius:50%;width:20px;height:20px;font-size:11px;cursor:pointer;line-height:20px;text-align:center;padding:0;align-self:flex-end}
-      #wa-link{display:flex;align-items:center;justify-content:center;width:58px;height:58px;border-radius:50%;background:#25D366;box-shadow:0 4px 18px rgba(37,211,102,.55);text-decoration:none}
-      #wa-link img{width:34px;height:34px;display:block}
-    </style>
-    <div id="wa-fab">
-      <button id="wa-x">✕</button>
-      <a id="wa-link" href="https://wa.me/919971766177?text=Hi%20AI24x7!%20I%20want%20to%20know%20more%20about%20your%20AI%20solutions." target="_blank">
-        <img src="https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg" alt="WhatsApp"/>
-      </a>
-    </div>
-    <script>document.getElementById('wa-x').addEventListener('click',function(){document.getElementById('wa-fab').classList.add('gone')});</script>
+    /* 2 - LEARN MORE BUTTONS */
+    Array.from(document.querySelectorAll("button,a")).filter(function(b){
+      return b.textContent.trim()==="Learn More"||b.textContent.includes("Learn More →");
+    }).forEach(function(b){
+      if(b._ai24fix) return;
+      b._ai24fix=true;
+      b.style.cursor="pointer";
+      b.addEventListener("click",function(e){
+        e.preventDefault();e.stopPropagation();
+        var parent=b.closest("[id]");
+        var target=parent?("#"+parent.id):"#solutions";
+        var el=document.querySelector(target)||document.querySelector("#solutions");
+        if(el) el.scrollIntoView({behavior:"smooth",block:"start"});
+      });
+    });
+
+    /* 3 - CONTACT SCROLLABLE */
+    var contact=document.getElementById("contact");
+    if(contact){
+      contact.style.overflowY="auto";
+      contact.querySelectorAll("form,[class*='form'],[class*='input'],[class*='inquiry']").forEach(function(el){
+        el.style.overflowY="auto";
+        el.style.maxHeight="none";
+      });
+    }
+
+    /* 4 - HOW IT WORKS steps visible */
+    var how=document.getElementById("how-it-works");
+    if(how){
+      how.querySelectorAll("[style*='opacity:0'],[style*='opacity: 0']").forEach(function(el){
+        el.style.opacity="1";
+        el.style.transform="none";
+      });
+      /* Make grid 3 columns on desktop */
+      if(window.innerWidth>768){
+        how.querySelectorAll("[class*='grid']").forEach(function(g){
+          g.style.gridTemplateColumns="repeat(3,1fr)";
+          g.style.display="grid";
+          g.style.gap="2rem";
+        });
+      }
+    }
+  }
+
+  /* Run after React mounts */
+  setTimeout(fixes,1000);
+  setTimeout(fixes,2500);
+  /* Watch for SPA navigation */
+  var obs=new MutationObserver(function(){fixes();});
+  document.addEventListener("DOMContentLoaded",function(){
+    obs.observe(document.body,{childList:true,subtree:true});
+    setTimeout(fixes,500);
+  });
+})();
+</script>
+<!-- END-PATCH -->
 </body></html>
