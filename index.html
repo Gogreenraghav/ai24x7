@@ -9,137 +9,206 @@
     <div id="root"></div>
   
 
-<!-- AI24X7-PATCH v3 -->
+
+<!-- AI24X7-PATCH v4 -->
 <style>
-/* HOW IT WORKS - Fix steps layout on desktop */
-section[id="how-it-works"] .grid,
-section[id="how-it-works"] [class*="grid-cols"] {
-  display: grid !important;
-  grid-template-columns: repeat(3, 1fr) !important;
-  gap: 2rem !important;
-}
-@media (max-width: 768px) {
-  section[id="how-it-works"] .grid,
-  section[id="how-it-works"] [class*="grid-cols"] {
-    grid-template-columns: 1fr !important;
-  }
-}
-/* Fix opacity/transform hidden steps */
-section[id="how-it-works"] [class*="opacity-0"] {
+/* ===== HOW IT WORKS: Force steps visible (override scroll-animation opacity) ===== */
+#how-it-works [class*="transition-all"][class*="opacity-0"],
+#how-it-works .opacity-0 {
   opacity: 1 !important;
+  transform: translateY(0) !important;
 }
-section[id="how-it-works"] [class*="translate-y"] {
-  transform: none !important;
+/* Ensure step grid is 3 columns on desktop */
+#how-it-works .grid {
+  display: grid !important;
 }
-/* CONTACT - Scrollable form */
-section[id="contact"] {
+#how-it-works [class*="md\:grid-cols-3"] {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+}
+
+/* ===== CONTACT/LEAD FORM MODAL: Scrollable on all devices ===== */
+.fixed.inset-0[class*="z-[100]"] {
+  align-items: flex-start !important;
   overflow-y: auto !important;
-  height: auto !important;
-  min-height: unset !important;
-}
-section[id="contact"] * {
-  max-height: none !important;
-}
-section[id="contact"] [class*="overflow-hidden"] {
-  overflow-y: auto !important;
+  padding-top: 16px !important;
+  padding-bottom: 16px !important;
+  -webkit-overflow-scrolling: touch !important;
 }
 @media (max-width: 768px) {
-  section[id="contact"],
-  section[id="contact"] > div,
-  section[id="contact"] form {
+  .fixed.inset-0[class*="z-[100]"] {
+    padding: 8px !important;
+  }
+  .fixed.inset-0[class*="z-[100]"] > div:last-child {
+    max-height: none !important;
     overflow-y: auto !important;
     -webkit-overflow-scrolling: touch !important;
-    height: auto !important;
   }
 }
+/* Ensure modal inner is scrollable */
+[class*="max-h-\[90vh\]"] {
+  max-height: 85vh !important;
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch !important;
+}
+
+/* ===== SOLUTIONS SECTION: Animation fix ===== */
+#solutions [class*="opacity-0"] {
+  opacity: 1 !important;
+  transform: translateY(0) !important;
+}
 </style>
+
 <script>
 (function(){
-  function fixes(){
-    /* 1 - VIEW ALL INDUSTRIES */
-    var btn = Array.from(document.querySelectorAll("button")).find(function(b){
-      return b.textContent.includes("View All Industries");
+"use strict";
+
+/* ---------- React Fiber Utilities ---------- */
+function fiberKey(el){
+  return Object.keys(el).find(function(k){return k.startsWith("__reactFiber");});
+}
+function getFiber(el){
+  var k=fiberKey(el); return k?el[k]:null;
+}
+
+/* Walk fiber tree - calls cb(fiber), returns first truthy result */
+function walkFiber(fiber, cb, depth){
+  if(!fiber||depth>200) return null;
+  var r=cb(fiber);
+  if(r) return r;
+  return walkFiber(fiber.child,cb,depth+1)||walkFiber(fiber.sibling,cb,depth+1);
+}
+
+/* Get all useState dispatchers from a fiber's hook list */
+function getDispatchers(fiber){
+  var out=[]; var h=fiber&&fiber.memoizedState;
+  while(h){
+    if(h.queue&&h.queue.dispatch) out.push({dispatch:h.queue.dispatch, state:h.memoizedState});
+    h=h.next;
+  }
+  return out;
+}
+
+/* Find dispatcher where current state matches predicate */
+function findDispatch(predicate){
+  var root=document.getElementById("root");
+  var f=getFiber(root);
+  if(!f) return null;
+  return walkFiber(f,function(fiber){
+    var hooks=getDispatchers(fiber);
+    for(var i=0;i<hooks.length;i++){
+      if(predicate(hooks[i].state,hooks[i].dispatch,i,hooks)) return hooks[i].dispatch;
+    }
+    return null;
+  },0);
+}
+
+/* ---------- Open Lead Modal ---------- */
+function openLeadModal(){
+  /* Try React fiber: find App-level boolean false state (isOpen=false initially) */
+  /* App has: [isOpen:bool, industrySlug:string, isIndustryModalOpen:bool] */
+  /* Look for a fiber whose first hook is boolean false AND second hook is string/null */
+  var dispatch=findDispatch(function(state,d,idx,all){
+    return idx===0 && state===false && all.length>=2 && 
+           (typeof all[1].state==="string"||all[1].state===null);
+  });
+  if(dispatch){dispatch(true);return;}
+  
+  /* Fallback: find any "Get Started" or "Book" CTA button */
+  var btns=Array.from(document.querySelectorAll("button,a")).filter(function(b){
+    var t=b.textContent.trim();
+    return t.includes("Get Started")||t.includes("Book")||t.includes("Demo")||t.includes("Schedule");
+  });
+  if(btns.length>0){btns[0].click();}
+}
+
+/* ---------- Reset Industry Category Filter (View All) ---------- */
+function resetIndustryFilter(){
+  var sec=document.getElementById("industries");
+  if(!sec) return;
+  var f=getFiber(sec);
+  if(!f) return;
+  /* IndustryMatrix has category state: first hook is string (selected category) */
+  var dispatch=walkFiber(f,function(fiber){
+    var hooks=getDispatchers(fiber);
+    /* Look for a hook with a string value (category name) as first state */
+    if(hooks.length>=1 && typeof hooks[0].state==="string"){
+      return hooks[0].dispatch;
+    }
+    return null;
+  },0);
+  if(dispatch){
+    /* Set to first category value to force re-render showing first group */
+    /* Then we'll show all by cycling — but simplest: remove filter */
+    dispatch(null);
+    dispatch(undefined);
+    /* React will use last dispatched value */
+  }
+  /* Show all visible cards regardless */
+  sec.querySelectorAll("[style*='display:none'],[style*='display: none']").forEach(function(el){
+    el.style.display="block";
+  });
+}
+
+/* ---------- Apply all fixes after React mounts ---------- */
+function applyFixes(){
+  /* 1. LEARN MORE BUTTONS in ThreePillars (solutions section) */
+  var learnMoreBtns=Array.from(document.querySelectorAll("#solutions button")).filter(function(b){
+    return b.textContent.trim().includes("Learn More");
+  });
+  learnMoreBtns.forEach(function(btn){
+    if(btn._ai24) return;
+    btn._ai24=1;
+    btn.style.cursor="pointer";
+    btn.addEventListener("click",function(e){
+      e.preventDefault(); e.stopPropagation();
+      openLeadModal();
     });
-    if(btn && !btn._ai24fix){
-      btn._ai24fix=true;
-      btn.addEventListener("click",function(){
-        var sec=document.getElementById("industries");
-        if(sec){
-          /* Remove any hidden/clipped grid rows */
-          sec.querySelectorAll("[class*='grid']").forEach(function(g){
-            g.style.maxHeight="none";
-            g.style.overflow="visible";
-          });
-          /* Show any hidden children */
-          sec.querySelectorAll("[style*='display:none'],[style*='display: none']").forEach(function(el){
-            el.style.display="block";
-          });
-          /* Remove overflow:hidden that clips rows */
-          var p=sec.parentElement;
-          for(var i=0;i<4&&p;i++){
-            if(window.getComputedStyle(p).overflow==="hidden") p.style.overflow="visible";
-            p=p.parentElement;
-          }
-        }
-        btn.innerHTML="All Industries ✓";
-        btn.disabled=true;
-        btn.style.opacity="0.7";
-      });
-    }
+  });
 
-    /* 2 - LEARN MORE BUTTONS */
-    Array.from(document.querySelectorAll("button,a")).filter(function(b){
-      return b.textContent.trim()==="Learn More"||b.textContent.includes("Learn More →");
-    }).forEach(function(b){
-      if(b._ai24fix) return;
-      b._ai24fix=true;
-      b.style.cursor="pointer";
-      b.addEventListener("click",function(e){
-        e.preventDefault();e.stopPropagation();
-        var parent=b.closest("[id]");
-        var target=parent?("#"+parent.id):"#solutions";
-        var el=document.querySelector(target)||document.querySelector("#solutions");
-        if(el) el.scrollIntoView({behavior:"smooth",block:"start"});
-      });
+  /* 2. VIEW ALL INDUSTRIES BUTTON */
+  var viewAllBtn=Array.from(document.querySelectorAll("#industries button")).find(function(b){
+    return b.textContent.trim().includes("View All Industries");
+  });
+  if(viewAllBtn && !viewAllBtn._ai24){
+    viewAllBtn._ai24=1;
+    viewAllBtn.addEventListener("click",function(){
+      resetIndustryFilter();
+      /* Also scroll to show industry grid */
+      var grid=document.querySelector("#industries .grid");
+      if(grid) grid.scrollIntoView({behavior:"smooth",block:"start"});
+      viewAllBtn.textContent="All Industries Shown ✓";
+      viewAllBtn.style.opacity="0.7";
     });
-
-    /* 3 - CONTACT SCROLLABLE */
-    var contact=document.getElementById("contact");
-    if(contact){
-      contact.style.overflowY="auto";
-      contact.querySelectorAll("form,[class*='form'],[class*='input'],[class*='inquiry']").forEach(function(el){
-        el.style.overflowY="auto";
-        el.style.maxHeight="none";
-      });
-    }
-
-    /* 4 - HOW IT WORKS steps visible */
-    var how=document.getElementById("how-it-works");
-    if(how){
-      how.querySelectorAll("[style*='opacity:0'],[style*='opacity: 0']").forEach(function(el){
-        el.style.opacity="1";
-        el.style.transform="none";
-      });
-      /* Make grid 3 columns on desktop */
-      if(window.innerWidth>768){
-        how.querySelectorAll("[class*='grid']").forEach(function(g){
-          g.style.gridTemplateColumns="repeat(3,1fr)";
-          g.style.display="grid";
-          g.style.gap="2rem";
-        });
-      }
-    }
   }
 
-  /* Run after React mounts */
-  setTimeout(fixes,1000);
-  setTimeout(fixes,2500);
-  /* Watch for SPA navigation */
-  var obs=new MutationObserver(function(){fixes();});
-  document.addEventListener("DOMContentLoaded",function(){
-    obs.observe(document.body,{childList:true,subtree:true});
-    setTimeout(fixes,500);
+  /* 3. HOW IT WORKS — force steps visible (intersection observer may not fire) */
+  var how=document.getElementById("how-it-works");
+  if(how){
+    /* Find all step divs with opacity-0 and force them visible */
+    how.querySelectorAll("[class]").forEach(function(el){
+      var cls=el.className||"";
+      if(cls.includes("opacity-0")){
+        el.style.opacity="1";
+        el.style.transform="none";
+      }
+    });
+  }
+}
+
+/* Run after React fully mounts */
+setTimeout(applyFixes, 800);
+setTimeout(applyFixes, 2000);
+
+/* Watch for modal opens (React re-renders) */
+var _obs=new MutationObserver(function(muts){
+  muts.forEach(function(m){
+    if(m.addedNodes.length) setTimeout(applyFixes,300);
   });
+});
+document.addEventListener("DOMContentLoaded",function(){
+  _obs.observe(document.body,{childList:true,subtree:false});
+});
+
 })();
 </script>
 <!-- END-PATCH -->
