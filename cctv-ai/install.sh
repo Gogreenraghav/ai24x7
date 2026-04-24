@@ -1,179 +1,179 @@
 #!/bin/bash
-# AI24x7 Vision SaaS - One Command Installer v1.0
-# Target: AMD Ryzen 7 5800X / 32GB RAM / 500GB SSD - CPU Only (₹42-50K machine)
-# Architecture: Customer machine captures CCTV → sends to cloud GPU API → gets analysis
+# AI24x7 Vision - One-Command Installer v1.1
+# Supports: CCTV Dashboard + Daily Reports + API Agent
+# Run: curl -sL https://raw.githubusercontent.com/Gogreenraghav/ai24x7-vision/main/install.sh | bash
 
 set -e
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
-info()  { echo -e "${GREEN}[✓]${NC} $1"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
-error() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
+echo "========================================"
+echo " AI24x7 Vision - Installer v1.1"
+echo "========================================"
 
-echo ""
-echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║   AI24x7 Vision SaaS - One Command Installer  ║${NC}"
-echo -e "${CYAN}║   CCTV AI Analysis for ₹42-50K Hardware      ║${NC}"
-echo -e "${CYAN}╚══════════════════════════════════════════════╝${NC}"
-echo ""
+# Colors
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
-# Detect root
-if [[ $EUID -ne 0 ]]; then
-    warn "Not running as root. Some steps may fail."
+log() { echo -e "${GREEN}[✓]${NC} $1"; }
+warn() { echo -e "${YELLOW}[!]${NC} $1"; }
+err() { echo -e "${RED}[✗]${NC} $1"; }
+
+# Check internet
+if ! curl -s --max-time 5 https://hf.co > /dev/null; then
+    err "No internet. Install requires internet."
+    exit 1
 fi
 
-# Check system
-info "Checking system..."
-TOTAL_RAM=$(free -g | grep Mem | awk '{print $2}')
-info "  RAM: ${TOTAL_RAM}GB"
-if [[ $TOTAL_RAM -lt 16 ]]; then
-    warn "  16GB+ recommended. ${TOTAL_RAM}GB may be slow."
+# Check OS
+if [[ "$(uname)" != "Linux" ]]; then
+    err "Linux required. Got: $(uname)"
+    exit 1
 fi
-AVAIL_DISK=$(df -BG / | tail -1 | awk '{print $4}' | tr -d 'G')
-info "  Disk free: ${AVAIL_DISK}GB"
-[[ $AVAIL_DISK -lt 30 ]] && error "30GB+ disk space needed"
 
-# Install deps
-info "Installing system packages..."
-if command -v apt-get &> /dev/null; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq 2>/dev/null
-    apt-get install -y -qq curl wget python3 python3-pip python3-venv git libgomp1 jq ffmpeg 2>/dev/null
-elif command -v yum &> /dev/null; then
-    yum install -y -q curl wget python3 python3-pip git ffmpeg 2>/dev/null
-elif command -v pacman &> /dev/null; then
-    pacman -Sy --noconfirm curl wget python3 python-pip git ffmpeg base-devel 2>/dev/null
+# Detect GPU (for local mode)
+HAS_GPU=false
+if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+    HAS_GPU=true
+    GPU_MODEL=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+    GPU_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader 2>/dev/null | head -1 | awk '{print $1}')
+    log "GPU detected: $GPU_MODEL (${GPU_MEM}MB VRAM)"
 fi
-info "  System packages OK"
+
+# Detect CPU cores
+CPU_CORES=$(nproc)
+RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+RAM_GB=$((RAM_KB / 1024 / 1024))
+
+log "System: $CPU_CORES CPU cores, ${RAM_GB}GB RAM"
+
+# Detect mode
+if [ "$HAS_GPU" = true ] && [ "$GPU_MEM" -ge 10000 ]; then
+    MODE="local"
+    warn "GPU mode: Will download model (~5.5GB)"
+else
+    MODE="cloud"
+    warn "Cloud mode: Will use remote API (no local model)"
+fi
+
+log "Mode selected: $MODE"
+
+# Create install directory
+INSTALL_DIR="/opt/ai24x7"
+mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
 
 # Install Python deps
-info "Installing Python packages..."
-pip3 install -q flask requests pillow python-telegram-bot opencv-python-headless --break-system-packages 2>/dev/null || \
-pip3 install -q flask requests pillow python-telegram-bot opencv-python-headless --user 2>/dev/null || true
-info "  Python packages OK"
+log "Installing Python dependencies..."
+pip install requests pillow python-telegram-bot opencv-python-headless -q 2>/dev/null || true
 
-# Create install dir
-INSTALL_DIR="/opt/ai24x7"
-mkdir -p "$INSTALL_DIR"/{models,logs,scripts}
-info "Install directory: $INSTALL_DIR"
+# Install dashboard deps
+log "Installing dashboard dependencies..."
+pip install streamlit opencv-python-headless -q 2>/dev/null || true
 
-# Download AI24x7 agent script
-info "Downloading AI24x7 Agent..."
-AGENT_URL="https://raw.githubusercontent.com/Arjun9350/ai24x7/main/ai24x7_agent.py"
-if command -v curl &> /dev/null; then
-    curl -s "$AGENT_URL" -o "$INSTALL_DIR/scripts/ai24x7_agent.py" 2>/dev/null || \
-    warn "Could not download from GitHub - will use embedded script"
+# Clone or update repo
+if [ -d "$INSTALL_DIR/.git" ]; then
+    log "Updating AI24x7..."
+    cd "$INSTALL_DIR" && git pull -q
+else
+    log "Cloning AI24x7 Vision repository..."
+    git clone -q https://github.com/Gogreenraghav/ai24x7-vision.git "$INSTALL_DIR" 2>/dev/null || true
 fi
-chmod +x "$INSTALL_DIR/scripts/ai24x7_agent.py" 2>/dev/null || true
 
-# Write embedded agent script (if download failed)
-cat > "$INSTALL_DIR/scripts/ai24x7_agent.py" << 'PYEOF'
-#!/usr/bin/env python3
-"""AI24x7 CCTV Agent - Customer Machine Software"""
-from flask import Flask, request, jsonify
-import os, logging, sys, signal, io
-from datetime import datetime
-import requests
+# Download model (local mode only)
+if [ "$MODE" = "local" ]; then
+    MODEL_DIR="$INSTALL_DIR/models"
+    mkdir -p "$MODEL_DIR"
+    
+    if [ ! -f "$MODEL_DIR/model-q5_k_m.gguf" ]; then
+        log "Downloading AI24x7 v10 model (~5.5GB)..."
+        log "This may take 5-15 minutes depending on internet speed..."
+        
+        # Download from HuggingFace
+        HF_TOKEN="${HF_TOKEN:-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}"
+        pip install huggingface_hub -q 2>/dev/null
+        
+        python3 -c "
+from huggingface_hub import hf_hub_download
+import os
+try:
+    path = hf_hub_download(
+        repo_id='Arjun9350/ai24x7-vision-v10',
+        filename='model-q5_k_m.gguf',
+        local_dir='$MODEL_DIR',
+        token='$HF_TOKEN',
+        local_dir_use_symlinks=False
+    )
+    print(f'Model saved to: {path}')
+except Exception as e:
+    print(f'Download error: {e}')
+    print('Falling back to model download...')
+"
+        # Fallback: direct download
+        if [ ! -f "$MODEL_DIR/model-q5_k_m.gguf" ]; then
+            wget -q --show-progress -O "$MODEL_DIR/model-q5_k_m.gguf" \
+                "https://huggingface.co/Arjun9350/ai24x7-vision-v10/resolve/main/model-q5_k_m.gguf" \
+                2>/dev/null || true
+        fi
+    else
+        log "Model already exists, skipping download."
+    fi
+fi
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s', stream=sys.stdout)
-logger = logging.getLogger('ai24x7')
+# Setup CCTV API config
+CONFIG_FILE="$INSTALL_DIR/config.json"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "{}" > "$CONFIG_FILE"
+fi
 
-app = Flask(__name__)
-CLOUD_API = os.environ.get('CLOUD_API', 'http://43.242.224.231:5050')
-API_KEY = os.environ.get('API_KEY', 'ai24x7-demo-key')
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8751634203:AAEtay1djJH_Do7i_ZkBaX7CGXW6SPmAXTY')
-CHAT_ID = os.environ.get('CHAT_ID', '')
+# Install dashboard
+if [ -f "$INSTALL_DIR/cctv_dashboard.py" ]; then
+    log "Dashboard found: $INSTALL_DIR/cctv_dashboard.py"
+    log "To launch dashboard:"
+    echo ""
+    echo -e "  ${YELLOW}streamlit run $INSTALL_DIR/cctv_dashboard.py --server.port 8501${NC}"
+    echo ""
+fi
 
-def alert(msg):
-    if not CHAT_ID: return
-    try:
-        import telegram
-        bot = telegram.Bot(BOT_TOKEN)
-        bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
-    except: pass
+# Setup Telegram bot
+log "Telegram bot: @ai24x7_vision_bot"
+log "Chat ID configured: 8566322083"
 
-@app.route('/health')
-def health():
-    return jsonify({'status': 'ok', 'service': 'AI24x7 Agent', 'cloud': CLOUD_API})
-
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    try:
-        img = request.files.get('image') or (request.form.get('image_url') and requests.get(request.form['image_url']).content)
-        if not img:
-            return jsonify({'error': 'no image'}), 400
-        img_bytes = img.read() if hasattr(img, 'read') else img
-        r = requests.post(f'{CLOUD_API}/analyze', files={'image': img_bytes}, headers={'X-API-Key': API_KEY}, timeout=120)
-        result = r.json()
-        if CHAT_ID and result.get('analysis'):
-            alert(f"🚨 AI24x7\n{result['analysis'][:300]}")
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/')
-def index():
-    return jsonify({'service': 'AI24x7 CCTV Agent v1.0', 'endpoints': ['/health', '/analyze']})
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5051))
-    logger.info(f"AI24x7 Agent starting on port {port}, cloud={CLOUD_API}")
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
-PYEOF
-
-chmod +x "$INSTALL_DIR/scripts/ai24x7_agent.py"
-
-# Write systemd service
-info "Creating systemd service..."
-cat > /etc/systemd/system/ai24x7.service << EOF
+# Auto-start on boot (optional)
+read -p "Enable auto-start on boot? (y/N): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    cat > /etc/systemd/system/ai24x7-dashboard.service << EOF
 [Unit]
-Description=AI24x7 Vision SaaS CCTV Agent
+Description=AI24x7 CCTV Dashboard
 After=network.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR
-Environment="CLOUD_API=http://43.242.224.231:5050"
-Environment="API_KEY=ai24x7-demo-key"
-Environment="BOT_TOKEN=8751634203:AAEtay1djJH_Do7i_ZkBaX7CGXW6SPmAXTY"
-Environment="CHAT_ID="
-Environment="PORT=5051"
-ExecStart=/usr/bin/python3 $INSTALL_DIR/scripts/ai24x7_agent.py
+ExecStart=$(which streamlit) run $INSTALL_DIR/cctv_dashboard.py --server.port 8501 --server.address 0.0.0.0
 Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    systemctl daemon-reload
+    systemctl enable ai24x7-dashboard
+    systemctl start ai24x7-dashboard
+    log "Dashboard auto-start enabled!"
+fi
 
-# Start service
-systemctl daemon-reload
-systemctl enable ai24x7 2>/dev/null || warn "systemd not available"
-systemctl restart ai24x7 2>/dev/null || true
-
-sleep 2
-
+# Final instructions
 echo ""
-echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║        INSTALLATION COMPLETE! 🎉             ║${NC}"
-echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
+echo "========================================"
+echo -e "${GREEN} AI24x7 Vision Installed Successfully!${NC}"
+echo "========================================"
 echo ""
-echo -e "  🌐 API URL:   http://YOUR-IP:5051/analyze"
-echo -e "  📊 Health:    http://YOUR-IP:5051/health"
-echo -e "  💬 Telegram:  DISABLED (set CHAT_ID)"
+echo "Dashboard URL: http://localhost:8501"
+echo "Install dir: $INSTALL_DIR"
+echo "Mode: $MODE"
 echo ""
-echo -e "  To enable Telegram alerts:"
-echo -e "    nano /etc/systemd/system/ai24x7.service"
-echo -e "    → Set CHAT_ID=your_telegram_chat_id"
-echo -e "    → systemctl restart ai24x7"
+echo "Quick start:"
+echo "  streamlit run $INSTALL_DIR/cctv_dashboard.py --server.port 8501"
 echo ""
-echo -e "  To configure CCTV cameras:"
-echo -e "    → Edit CLOUD_API to point to your GPU server"
-echo -e "    → Camera RTSP URLs: request.files['image'] or /camera/<id>/snapshot"
-echo ""
-echo -e "  ✅ Service status:"
-systemctl is-active ai24x7 2>/dev/null && echo -e "    ${GREEN}RUNNING${NC}" || echo -e "    ${YELLOW}Check manually${NC}"
+echo "For API agent:"
+echo "  python3 $INSTALL_DIR/ai24x7_agent.py"
 echo ""
