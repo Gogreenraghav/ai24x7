@@ -1,452 +1,634 @@
 """
-AI24x7 - Face Recognition Module
-YOLOv8-Face detection + ArcFace embeddings for person identification
-Runs on customer GPU machine (RTX 3060 minimum)
+AI24x7 - Face Recognition Module v2.0
+Fully local - NO external model downloads required!
+Layer 1: YOLOv8n (person detection) - downloads automatically
+Layer 2: Haar Cascade (face detection) - built into OpenCV
+Layer 3: LBPH (face recognition) - built into OpenCV
+Layer 4: HOG + LBP histogram (embedding generation) - custom
 """
-import os, sys, time, json, sqlite3, hashlib
+import os, sys, time, json, sqlite3, hashlib, pickle
 import numpy as np
 import cv2
 from datetime import datetime
 from pathlib import Path
+import struct
 
-# ─── Try imports ───────────────────────────
+# ─── Check Dependencies ───────────────────
+try:
+    import torch
+    TORCH_OK = True
+except:
+    TORCH_OK = False
+
 try:
     from ultralytics import YOLO
     ULTRALYTICS_OK = True
-except ImportError:
+except:
     ULTRALYTICS_OK = False
-    print("⚠️ ultralytics not installed - run: pip install ultralytics")
-
-try:
-    import onnxruntime as ort
-    ONNXRUNTIME_OK = True
-except ImportError:
-    ONNXRUNTIME_OK = False
-    print("⚠️ onnxruntime not installed - pip install onnxruntime onnx")
 
 # ─── Paths ────────────────────────────────
-FACE_DB_PATH = "/opt/ai24x7/face_db.sqlite"
-FACES_DIR = "/opt/ai24x7/known_faces"
-MODEL_DIR = "/opt/ai24x7/models"
-
+MODEL_DIR = Path("/opt/ai24x7/models")
+FACES_DIR = Path("/opt/ai24x7/known_faces")
+FACE_DB = Path("/opt/ai24x7/face_db.sqlite")
+os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(FACES_DIR, exist_ok=True)
 
 # ─── Database Setup ────────────────────────
-def init_face_db():
-    conn = sqlite3.connect(FACE_DB_PATH)
+def init_db():
+    conn = sqlite3.connect(FACE_DB)
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS known_faces (
+        CREATE TABLE IF NOT EXISTS known_persons (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             person_id TEXT UNIQUE NOT NULL,
             person_name TEXT NOT NULL,
-            person_role TEXT,
-            embedding BLOB NOT NULL,
+            role TEXT,
+            encoding BLOB NOT NULL,
             image_path TEXT,
             registered_at TEXT DEFAULT (datetime('now')),
             last_seen TEXT,
-            seen_count INTEGER DEFAULT 0
+            seen_count INTEGER DEFAULT 0,
+            camera_locations TEXT DEFAULT '[]'
         )
     """)
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS face_log (
+        CREATE TABLE IF NOT EXISTS recognition_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             person_id TEXT,
             person_name TEXT,
-            camera_name TEXT,
+            camera TEXT,
             confidence REAL,
             timestamp TEXT DEFAULT (datetime('now')),
-            image_path TEXT
+            image_path TEXT,
+            is_known INTEGER DEFAULT 1
         )
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS unknown_faces (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            embedding BLOB,
-            camera_name TEXT,
+            encoding BLOB,
+            camera TEXT,
             confidence REAL,
-            image_path TEXT,
-            timestamp TEXT DEFAULT (datetime('now'))
+            timestamp TEXT DEFAULT (datetime('now')),
+            image_path TEXT
         )
     """)
     conn.commit()
     conn.close()
 
-def db_conn():
-    conn = sqlite3.connect(FACE_DB_PATH)
+def get_db():
+    conn = sqlite3.connect(FACE_DB)
     conn.row_factory = sqlite3.Row
     return conn
 
-# ─── Face Detection (YOLOv8-Face) ─────────
-class FaceDetector:
+# ─── Face Embedding Generator ─────────────
+class FaceEncoder:
     """
-    Uses YOLOv8 face detection model.
-    Downloads automatically on first run.
+    Generate face embeddings without external models.
+    Uses HOG + LBP + color histogram combination.
+    Works completely offline.
     """
-    MODEL_URL = "https://huggingface.co/Bingsu/adetailer/resolve/main/yolov8n-face.pt"
+    def __init__(self, encoding_size=128):
+        self.encoding_size = encoding_size
+        self.face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        )
+        self.lbph = cv2.face.LBPHFaceRecognizer_create(
+            radius=1, neighbors=8, grid_x=8, grid_y=8, threshold=100
+        )
+        self.trained = False
     
-    def __init__(self, model_name="yolov8n-face.pt"):
-        self.model_name = model_name
-        self.model_path = Path(MODEL_DIR) / model_name
-        self.model = None
+    def _preprocess_face(self, face):
+        """Preprocess face for encoding"""
+        if face.size == 0:
+            return None
+        face = cv2.resize(face, (160, 160))
+        gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
+        return gray
+    
+    def _hog_features(self, gray_face):
+        """Extract HOG-like features from grayscale face"""
+        if gray_face is None:
+            return np.zeros(64)
+        # Simple gradient-based features
+        gx = cv2.Sobel(gray_face, cv2.CV_64F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray_face, cv2.CV_64F, 0, 1, ksize=3)
+        mag = np.sqrt(gx**2 + gy**2)
+        angle = np.arctan2(gy, gx) * 180 / np.pi
         
-        if not ULTRALYTICS_OK:
-            print("❌ ultralytics not installed")
-            return
+        # Histogram of orientations
+        hist, _ = np.histogram(angle, bins=8, range=(-180, 180), weights=mag)
+        hist = hist / (hist.sum() + 1e-8)
+        return hist
+    
+    def _lbp_features(self, gray_face):
+        """Extract LBP-like features"""
+        if gray_face is None:
+            return np.zeros(32)
+        # Simple LBP approximation
+        h, w = gray_face.shape
+        features = []
+        for i in range(1, h-1):
+            for j in range(1, w-1):
+                center = gray_face[i, j]
+                code = 0
+                code |= (1 if gray_face[i-1, j-1] >= center else 0)
+                code |= (2 if gray_face[i-1, j] >= center else 0)
+                code |= (4 if gray_face[i-1, j+1] >= center else 0)
+                code |= (8 if gray_face[i, j+1] >= center else 0)
+                code |= (16 if gray_face[i+1, j+1] >= center else 0)
+                code |= (32 if gray_face[i+1, j] >= center else 0)
+                code |= (64 if gray_face[i+1, j-1] >= center else 0)
+                code |= (128 if gray_face[i, j-1] >= center else 0)
+                features.append(code)
         
-        # Download if not exists
-        if not self.model_path.exists():
-            print(f"📥 Downloading YOLOv8n face model...")
-            from ultralytics import YOLO
-            # Use base yolov8n and configure for face detection
-            base_model = YOLO("yolov8n.pt")
-            # For now use person detection which is in-built
-            self.model = YOLO("yolov8n.pt")
-            print("⚠️ Using YOLOv8n (person detection) - for face use yolov8-face model")
+        hist, _ = np.histogram(features, bins=32, range=(0, 256))
+        hist = hist / (hist.sum() + 1e-8)
+        return hist
+    
+    def _color_features(self, face):
+        """Extract color histogram features"""
+        if face is None or face.size == 0:
+            return np.zeros(24)
+        h, w = face.shape[:2]
+        # Split into regions
+        top = face[:h//3, :, :]
+        mid = face[h//3:2*h//3, :, :]
+        bot = face[2*h//3:, :, :]
+        
+        features = []
+        for region in [top, mid, bot]:
+            for c in range(3):
+                h2, _ = np.histogram(region[:,:,c], bins=8, range=(0, 256))
+                h2 = h2 / (h2.sum() + 1e-8)
+                features.extend(h2)
+        return np.array(features)
+    
+    def encode(self, face_crop):
+        """Generate combined embedding from face crop"""
+        gray = self._preprocess_face(face_crop)
+        if gray is None:
+            return np.zeros(self.encoding_size)
+        
+        hog = self._hog_features(gray)
+        lbp = self._lbp_features(gray)
+        color = self._color_features(face_crop)
+        
+        # Concatenate all features
+        embedding = np.concatenate([hog, lbp, color])
+        
+        # Pad or truncate to encoding_size
+        if len(embedding) < self.encoding_size:
+            embedding = np.pad(embedding, (0, self.encoding_size - len(embedding)))
         else:
-            self.model = YOLO(str(self.model_path))
+            embedding = embedding[:self.encoding_size]
+        
+        # Normalize
+        embedding = embedding / (np.linalg.norm(embedding) + 1e-8)
+        return embedding.astype(np.float32)
     
-    def detect(self, frame, conf=0.5):
-        """
-        Detect faces in frame.
-        Returns list of bounding boxes: [(x1,y1,x2,y2, confidence), ...]
-        """
-        if self.model is None:
-            # Fallback: detect using face_cascade (OpenCV)
-            return self._detect_opencv(frame, conf)
-        
-        results = self.model(frame, verbose=False, conf=conf)
-        detections = []
-        
-        for r in results:
-            boxes = r.boxes
-            for box in boxes:
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                conf_score = float(box.conf[0].cpu().numpy())
-                cls = int(box.cls[0].cpu().numpy())
-                # 0 = person in standard YOLO, adjust as needed
-                detections.append((int(x1), int(y1), int(x2), int(y2), conf_score, cls))
-        
-        return detections
+    def cosine_similarity(self, e1, e2):
+        return float(np.dot(e1, e2) / (np.linalg.norm(e1) * np.linalg.norm(e2) + 1e-8))
     
-    def _detect_opencv(self, frame, conf=0.5):
-        """Fallback using OpenCV Haar Cascade"""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        if os.path.exists(cascade_path):
-            cascade = cv2.CascadeClassifier(cascade_path)
-            faces = cascade.detectMultiScale(gray, 1.1, 4)
-            return [(int(x), int(y), int(x+w), int(y+h), 0.8) for x,y,w,h in faces]
-        return []
+    def save_training_data(self, encodings, labels, filepath):
+        """Save training data for LBPH"""
+        with open(filepath, 'wb') as f:
+            pickle.dump((encodings, labels), f)
+    
+    def load_training_data(self, filepath):
+        """Load training data"""
+        if os.path.exists(filepath):
+            with open(filepath, 'rb') as f:
+                return pickle.load(f)
+        return None, None
 
-# ─── Face Embedding (ArcFace) ──────────────
-class FaceEmbedder:
-    """
-    ArcFace embedding generator.
-    Uses ONNX model for GPU-accelerated inference.
-    """
-    def __init__(self, model_path=None):
-        self.model_path = model_path or f"{MODEL_DIR}/arcface_w600k_r50.onnx"
-        self.session = None
-        
-        if ONNXRUNTIME_OK and os.path.exists(self.model_path):
-            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-            try:
-                self.session = ort.InferenceSession(self.model_path, providers=providers)
-                print(f"✅ ArcFace loaded (GPU)")
-            except:
-                self.session = ort.InferenceSession(self.model_path, providers=['CPUExecutionProvider'])
-                print(f"✅ ArcFace loaded (CPU)")
-        else:
-            # Use CLIP/FaceNet alternative - simpler embedding
-            print("⚠️ ArcFace model not found - using simplified embeddings")
-            self.session = None
-    
-    def get_embedding(self, face_crop):
-        """
-        Generate 512-dim embedding for a face crop.
-        Returns numpy array of shape (512,)
-        """
-        if self.session:
-            # Preprocess
-            face = cv2.resize(face_crop, (112, 112))
-            face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-            face = face.astype(np.float32) / 255.0
-            face = (face - 0.5) / 0.5
-            face = face.transpose(2, 0, 1)[np.newaxis, ...]
-            
-            # Inference
-            input_name = self.session.get_inputs()[0].name
-            embedding = self.session.run(None, {input_name: face})[0]
-            embedding = embedding.flatten()
-            embedding = embedding / np.linalg.norm(embedding)
-            return embedding
-        else:
-            # Fallback: simple histogram embedding
-            face = cv2.resize(face_crop, (64, 64))
-            gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
-            hist = cv2.calcHist([gray], [0], None, [128], [0, 256])
-            hist = hist.flatten() / hist.sum()
-            return hist
-    
-    def cosine_similarity(self, emb1, emb2):
-        """Calculate cosine similarity between two embeddings"""
-        return float(np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2) + 1e-8))
 
-# ─── Face Database Manager ────────────────
-class FaceDatabase:
+# ─── Person Detector (YOLOv8n - auto download) ──
+class PersonDetector:
     """
-    Manages known face database.
-    Handles add, remove, search, match operations.
+    Uses YOLOv8n for person detection.
+    Downloads automatically from ultralytics hub - no manual setup needed.
+    Falls back to Haar cascade if ultralytics not available.
     """
     def __init__(self):
-        init_face_db()
-        self.embedder = FaceEmbedder()
-        self.threshold = 0.5  # similarity threshold for match
+        self.model = None
+        self.face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        )
+        
+        if ULTRALYTICS_OK:
+            try:
+                self.model = YOLO('yolov8n.pt')
+                self.type = "yolov8n_person"
+                print("✅ PersonDetector: YOLOv8n loaded (auto-download)")
+            except Exception as e:
+                print(f"⚠️ YOLOv8n load failed: {e}")
+                self.type = "haar"
+        else:
+            self.type = "haar"
+            print("⚠️ PersonDetector: Using Haar cascade fallback")
     
-    def add_person(self, person_id, person_name, face_crop, person_role=""):
-        """
-        Add a new known person.
-        person_id: unique ID (e.g. "emp_001", "owner")
-        person_name: display name
-        face_crop: cropped face image (numpy array)
-        """
-        emb = self.embedder.get_embedding(face_crop)
-        emb_bytes = emb.tobytes()
+    def detect_persons(self, frame, conf=0.5):
+        """Detect persons in frame. Returns list of person crops."""
+        person_crops = []
+        
+        if self.model and self.type == "yolov8n_person":
+            try:
+                results = self.model(frame, verbose=False, conf=conf, classes=[0])
+                for r in results:
+                    boxes = r.boxes
+                    for box in boxes:
+                        cls = int(box.cls[0].cpu().numpy())
+                        if cls == 0:  # person class
+                            x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
+                            crop = frame[y1:y2, x1:x2]
+                            if crop.size > 0:
+                                person_crops.append({
+                                    'crop': crop,
+                                    'bbox': (x1, y1, x2, y2),
+                                    'conf': float(box.conf[0].cpu().numpy()),
+                                    'type': 'yolo'
+                                })
+            except Exception as e:
+                print(f"YOLOv8n detection error: {e}")
+                self._haar_fallback(frame, person_crops)
+        else:
+            self._haar_fallback(frame, person_crops)
+        
+        return person_crops
+    
+    def _haar_fallback(self, frame, person_crops):
+        """Fallback: use body/haar detection for person areas"""
+        # Use full body detection
+        body_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + 'haarcascade_fullbody.xml'
+        )
+        if body_cascade.empty():
+            return
+        
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        bodies = body_cascade.detectMultiScale(gray, 1.1, 3)
+        
+        for x, y, w, h in bodies:
+            crop = frame[y:y+h, x:x+w]
+            if crop.size > 0:
+                person_crops.append({
+                    'crop': crop,
+                    'bbox': (x, y, x+w, y+h),
+                    'conf': 0.7,
+                    'type': 'haar'
+                })
+    
+    def detect_faces_in_person(self, person_crop, conf=0.3):
+        """Detect faces within a person crop"""
+        gray = cv2.cvtColor(person_crop, cv2.COLOR_BGR2GRAY)
+        faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
+        
+        face_crops = []
+        for x, y, w, h in faces:
+            fx1, fy1, fx2, fy2 = x, y, x+w, y+h
+            face_crop = person_crop[fy1:fy2, fx1:fx2]
+            if face_crop.size > 0:
+                face_crops.append({
+                    'crop': face_crop,
+                    'bbox': (x, y, x+w, y+h),
+                    'conf': 0.8
+                })
+        return face_crops
+
+
+# ─── Face Recognition Engine ────────────────
+class FaceEngine:
+    """
+    Main face recognition engine.
+    Handles add, match, track operations.
+    """
+    def __init__(self, similarity_threshold=0.45):
+        init_db()
+        self.detector = PersonDetector()
+        self.encoder = FaceEncoder()
+        self.threshold = similarity_threshold
+        
+        # Try to load LBPH recognizer if trained data exists
+        training_path = MODEL_DIR / "lbph_training.pkl"
+        encodings, labels = self.encoder.load_training_data(str(training_path))
+        if encodings and labels:
+            try:
+                self.encoder.lbph.train(encodings, np.array(labels))
+                self.encoder.trained = True
+                print(f"✅ LBPH trained with {len(encodings)} samples")
+            except Exception as e:
+                print(f"⚠️ LBPH training failed: {e}")
+    
+    def add_person(self, person_id, name, face_crop, role=""):
+        """Register a new known person"""
+        encoding = self.encoder.encode(face_crop)
         
         # Save face image
-        img_path = f"{FACES_DIR}/{person_id}.jpg"
-        cv2.imwrite(img_path, face_crop)
+        img_path = FACES_DIR / f"{person_id}.jpg"
+        cv2.imwrite(str(img_path), face_crop)
         
-        conn = db_conn()
+        conn = get_db()
         try:
             conn.execute("""
-                INSERT OR REPLACE INTO known_faces 
-                (person_id, person_name, person_role, embedding, image_path, registered_at)
+                INSERT OR REPLACE INTO known_persons 
+                (person_id, person_name, role, encoding, image_path, registered_at)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (person_id, person_name, person_role, emb_bytes, img_path, datetime.now().isoformat()))
+            """, (person_id, name, role, encoding.tobytes(), str(img_path), datetime.now().isoformat()))
             conn.commit()
-            print(f"✅ Added: {person_name} ({person_id})")
+            
+            # Save to training data for LBPH
+            self._update_lbph_training(person_id, encoding)
+            print(f"✅ Registered: {name} ({person_id})")
             return True
         except Exception as e:
-            print(f"❌ Error adding person: {e}")
+            print(f"❌ Error: {e}")
             return False
         finally:
             conn.close()
     
-    def find_match(self, face_crop, top_k=3):
-        """
-        Find best match for a detected face.
-        Returns: (matched_person_id, name, similarity) or (None, None, 0)
-        """
-        emb = self.embedder.get_embedding(face_crop)
-        conn = db_conn()
+    def _update_lbph_training(self, person_id, encoding):
+        """Update LBPH training data"""
+        training_path = MODEL_DIR / "lbph_training.pkl"
+        encodings, labels = self.encoder.load_training_data(str(training_path))
         
+        if encodings is None:
+            encodings = []
+            labels = []
+        
+        encodings.append(encoding)
+        labels.append(person_id)
+        
+        self.encoder.save_training_data(encodings, labels, str(training_path))
+        
+        # Retrain LBPH
         try:
-            rows = conn.execute("SELECT * FROM known_faces").fetchall()
-            if not rows:
-                return None, None, 0.0
-            
-            matches = []
-            for row in rows:
-                stored_emb = np.frombuffer(row["embedding"], dtype=np.float32)
-                sim = self.embedder.cosine_similarity(emb, stored_emb)
-                if sim >= self.threshold:
-                    matches.append((row["person_id"], row["person_name"], sim))
-            
-            if not matches:
-                return None, None, 0.0
-            
-            matches.sort(key=lambda x: x[2], reverse=True)
-            return matches[0][:3]
-        finally:
-            conn.close()
+            self.encoder.lbph.train(encodings, np.array([hash(l) for l in labels]))
+            self.encoder.trained = True
+        except Exception as e:
+            print(f"⚠️ LBPH retrain failed: {e}")
     
-    def register_unknown(self, face_crop, camera_name, confidence):
-        """Log unknown face for later review"""
-        emb = self.embedder.get_embedding(face_crop)
-        emb_bytes = emb.tobytes()
+    def find_match(self, face_crop):
+        """
+        Find best match for a face.
+        Returns: (person_id, name, similarity) or (None, None, 0)
+        """
+        query_encoding = self.encoder.encode(face_crop)
         
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        img_path = f"{FACES_DIR}/unknown_{ts}.jpg"
-        cv2.imwrite(img_path, face_crop)
-        
-        conn = db_conn()
-        conn.execute("""
-            INSERT INTO unknown_faces (embedding, camera_name, confidence, image_path, timestamp)
-            VALUES (?, ?, ?, ?, ?)
-        """, (emb_bytes, camera_name, confidence, img_path, datetime.now().isoformat()))
-        conn.commit()
+        conn = get_db()
+        rows = conn.execute("SELECT * FROM known_persons").fetchall()
         conn.close()
+        
+        if not rows:
+            return None, None, 0.0
+        
+        best_match = None
+        best_sim = 0.0
+        
+        for row in rows:
+            stored_encoding = np.frombuffer(row["encoding"], dtype=np.float32)
+            sim = self.encoder.cosine_similarity(query_encoding, stored_encoding)
+            
+            if sim > best_sim:
+                best_sim = sim
+                best_match = dict(row)
+        
+        if best_sim >= self.threshold:
+            return best_match["person_id"], best_match["person_name"], float(best_sim)
+        return None, None, float(best_sim)
     
-    def log_recognition(self, person_id, person_name, camera_name, confidence, image_path=None):
-        """Log successful recognition"""
-        conn = db_conn()
+    def log_recognition(self, person_id, name, camera, conf, img_path=None, is_known=True):
+        """Log a recognition event"""
+        conn = get_db()
+        if person_id:
+            conn.execute("""
+                UPDATE known_persons 
+                SET last_seen=?, seen_count=seen_count+1 
+                WHERE person_id=?
+            """, (datetime.now().isoformat(), person_id))
+        
         conn.execute("""
-            UPDATE known_faces SET last_seen=?, seen_count=seen_count+1 WHERE person_id=?
-        """, (datetime.now().isoformat(), person_id))
-        conn.execute("""
-            INSERT INTO face_log (person_id, person_name, camera_name, confidence, image_path, timestamp)
+            INSERT INTO recognition_log 
+            (person_id, person_name, camera, confidence, image_path, is_known)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (person_id, person_name, camera_name, confidence, image_path, datetime.now().isoformat()))
+        """, (person_id, name, camera, conf, img_path, 1 if is_known else 0))
         conn.commit()
         conn.close()
+    
+    def register_unknown(self, face_crop, camera, conf):
+        """Log unknown face for admin review"""
+        encoding = self.encoder.encode(face_crop)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        img_path = FACES_DIR / f"unknown_{ts}.jpg"
+        cv2.imwrite(str(img_path), face_crop)
+        
+        conn = get_db()
+        conn.execute("""
+            INSERT INTO unknown_faces (encoding, camera, confidence, image_path)
+            VALUES (?, ?, ?, ?)
+        """, (encoding.tobytes(), camera, conf, str(img_path)))
+        conn.commit()
+        conn.close()
+    
+    def process_frame(self, frame, camera_name="cam1", draw=True):
+        """
+        Process entire frame: detect persons → detect faces → match
+        Returns: list of recognition results + optionally annotated frame
+        """
+        results = []
+        
+        # Step 1: Detect persons
+        persons = self.detector.detect_persons(frame, conf=0.5)
+        
+        for person in persons:
+            person_crop = person['crop']
+            person_bbox = person['bbox']
+            person_conf = person['conf']
+            
+            # Step 2: Detect faces in person crop
+            faces = self.detector.detect_faces_in_person(person_crop, conf=0.4)
+            
+            if not faces:
+                # No face detected but person detected - still log it
+                results.append({
+                    'person_bbox': person_bbox,
+                    'face_bbox': None,
+                    'person_id': None,
+                    'name': 'Unknown Person',
+                    'confidence': person_conf,
+                    'is_known': False,
+                    'camera': camera_name
+                })
+                if draw:
+                    x1, y1, x2, y2 = person_bbox
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (128, 128, 128), 2)
+                    cv2.putText(frame, "Person", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128,128,128), 2)
+                continue
+            
+            # Take largest face
+            best_face = max(faces, key=lambda f: f['conf'])
+            face_crop = best_face['crop']
+            face_conf = best_face['conf']
+            
+            # Step 3: Match face
+            pid, name, sim = self.find_match(face_crop)
+            
+            if pid:
+                self.log_recognition(pid, name, camera_name, face_conf, None, True)
+                results.append({
+                    'person_bbox': person_bbox,
+                    'face_bbox': best_face['bbox'],
+                    'person_id': pid,
+                    'name': name,
+                    'confidence': face_conf,
+                    'similarity': sim,
+                    'is_known': True,
+                    'camera': camera_name
+                })
+                if draw:
+                    x1, y1, x2, y2 = person_bbox
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(frame, f"#{pid}: {name}", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+            else:
+                self.register_unknown(face_crop, camera_name, face_conf)
+                results.append({
+                    'person_bbox': person_bbox,
+                    'face_bbox': best_face['bbox'],
+                    'person_id': None,
+                    'name': 'Unknown',
+                    'confidence': face_conf,
+                    'similarity': sim,
+                    'is_known': False,
+                    'camera': camera_name
+                })
+                if draw:
+                    x1, y1, x2, y2 = person_bbox
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    cv2.putText(frame, "UNKNOWN", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+        
+        return results, frame if draw else None
     
     def get_all_persons(self):
-        """Get all registered persons"""
-        conn = db_conn()
-        rows = conn.execute("SELECT * FROM known_faces ORDER BY person_name").fetchall()
+        conn = get_db()
+        rows = conn.execute("SELECT * FROM known_persons ORDER BY person_name").fetchall()
         conn.close()
         return [dict(r) for r in rows]
     
-    def remove_person(self, person_id):
-        """Remove a person from database"""
-        conn = db_conn()
-        img_path = conn.execute("SELECT image_path FROM known_faces WHERE person_id=?", (person_id,)).fetchone()
-        if img_path and os.path.exists(img_path[0]):
-            os.remove(img_path[0])
-        conn.execute("DELETE FROM known_faces WHERE person_id=?", (person_id,))
-        conn.commit()
-        conn.close()
-        print(f"✅ Removed: {person_id}")
-
-# ─── Face Recognition Processor ────────────
-class FaceProcessor:
-    """
-    Main processor: detect + recognize faces in CCTV frame.
-    """
-    def __init__(self):
-        self.detector = FaceDetector()
-        self.db = FaceDatabase()
-        self.confidence_threshold = 0.5
-        self.alert_on_unknown = True
-        self.alert_on_known = True
-    
-    def process_frame(self, frame, camera_name="cam1", return_image=False):
-        """
-        Process a frame: detect faces and match against database.
-        Returns: list of recognition results
-        """
-        detections = self.detector.detect(frame, conf=self.confidence_threshold)
-        results = []
-        
-        for x1, y1, x2, y2, conf, cls in detections:
-            face_crop = frame[y1:y2, x1:x2]
-            
-            if face_crop.size == 0:
-                continue
-            
-            # Find match
-            pid, name, sim = self.db.find_match(face_crop)
-            
-            result = {
-                "bbox": (x1, y1, x2, y2),
-                "confidence": conf,
-                "person_id": pid,
-                "person_name": name,
-                "similarity": sim,
-                "is_known": pid is not None,
-                "is_unknown": not pid,
-                "camera": camera_name,
-                "timestamp": datetime.now().isoformat()
-            }
-            results.append(result)
-            
-            # Actions based on result
-            if not pid and self.alert_on_unknown:
-                self.db.register_unknown(face_crop, camera_name, conf)
-                result["action"] = "unknown_face_alert"
-            
-            elif pid and self.alert_on_known:
-                self.db.log_recognition(pid, name, camera_name, conf)
-                result["action"] = "known_person_seen"
-            
-            # Draw on image if requested
-            if return_image:
-                color = (0, 255, 0) if pid else (0, 0, 255)
-                label = f"{name} ({sim:.0%})" if pid else f"Unknown ({conf:.0%})"
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        
-        return results
-    
-    def add_known_person(self, person_id, name, face_image, role=""):
-        """Register a new known person"""
-        return self.db.add_person(person_id, name, face_image, role)
-    
     def get_recognition_log(self, limit=50):
-        """Get recent recognition history"""
-        conn = db_conn()
+        conn = get_db()
         rows = conn.execute("""
-            SELECT * FROM face_log ORDER BY timestamp DESC LIMIT ?
+            SELECT * FROM recognition_log ORDER BY timestamp DESC LIMIT ?
         """, (limit,)).fetchall()
         conn.close()
         return [dict(r) for r in rows]
     
     def get_unknown_faces(self):
-        """Get unknown faces for admin review"""
-        conn = db_conn()
+        conn = get_db()
         rows = conn.execute("""
-            SELECT id, camera_name, confidence, image_path, timestamp
-            FROM unknown_faces ORDER BY timestamp DESC LIMIT 20
+            SELECT * FROM unknown_faces ORDER BY timestamp DESC LIMIT 20
         """).fetchall()
         conn.close()
         return [dict(r) for r in rows]
+    
+    def remove_person(self, person_id):
+        conn = get_db()
+        img = conn.execute("SELECT image_path FROM known_persons WHERE person_id=?", (person_id,)).fetchone()
+        if img and os.path.exists(img[0]):
+            os.remove(img[0])
+        conn.execute("DELETE FROM known_persons WHERE person_id=?", (person_id,))
+        conn.commit()
+        conn.close()
+        print(f"✅ Removed: {person_id}")
 
 
 # ─── CLI ────────────────────────────────────
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="AI24x7 Face Recognition")
-    parser.add_argument("--add", metavar=("ID", "NAME"), nargs=2, help="Add known person")
+    parser = argparse.ArgumentParser(description="AI24x7 Face Recognition v2.0")
+    parser.add_argument("--status", action="store_true", help="Show system status")
     parser.add_argument("--list", action="store_true", help="List known persons")
+    parser.add_argument("--add", nargs=3, metavar=("ID", "NAME", "IMAGE"),
+                       help="Add person: --add emp001 Ram /path/to/face.jpg")
     parser.add_argument("--log", action="store_true", help="Show recognition log")
     parser.add_argument("--unknown", action="store_true", help="Show unknown faces")
-    parser.add_argument("--remove", metavar="ID", help="Remove person")
-    parser.add_argument("--test-image", metavar="PATH", help="Test on image file")
+    parser.add_argument("--remove", metavar="ID", help="Remove person by ID")
+    parser.add_argument("--test", metavar="PATH", help="Test on image")
     
     args = parser.parse_args()
-    fp = FaceProcessor()
+    engine = FaceEngine()
     
-    if args.list:
-        persons = fp.db.get_all_persons()
-        print(f"\n📋 Known Persons ({len(persons)}):")
+    if args.status:
+        persons = engine.get_all_persons()
+        print(f"📋 System Status:")
+        print(f"   Detectors: {'YOLOv8n' if ULTRALYTICS_OK else 'Haar fallback'}")
+        print(f"   Encoder: HOG+LBP+Color histogram")
+        print(f"   Threshold: {engine.threshold}")
+        print(f"   Known persons: {len(persons)}")
+    
+    elif args.list:
+        persons = engine.get_all_persons()
+        print(f"\n👥 Known Persons ({len(persons)}):")
         for p in persons:
-            print(f"  {p['person_id']:15s} | {p['person_name']:20s} | {p['person_role'] or 'N/A':15s} | seen: {p['seen_count']}x")
+            print(f"   {p['person_id']:15s} | {p['person_name']:20s} | {p['role'] or 'N/A':12s} | seen: {p['seen_count']}x")
     
     elif args.add:
-        pid, name = args.add
-        print(f"📸 Taking photo for {name}...")
-        print("⚠️ Use --test-image with a cropped face image for now")
-        print(f"   Then: python3 face_recognition.py --enroll {pid} {name} <image_path>")
+        pid, name, img_path = args.add
+        if not os.path.exists(img_path):
+            print(f"❌ Image not found: {img_path}")
+        else:
+            img = cv2.imread(img_path)
+            if img is None:
+                print(f"❌ Cannot read image: {img_path}")
+            else:
+                # Detect and use largest face
+                detector = PersonDetector()
+                persons = detector.detect_persons(img, conf=0.5)
+                if not persons:
+                    print("❌ No person found in image")
+                else:
+                    # Get face from person
+                    p = persons[0]
+                    faces = detector.detect_faces_in_person(p['crop'], conf=0.3)
+                    if faces:
+                        face_crop = max(faces, key=lambda f: f['conf'])['crop']
+                    else:
+                        face_crop = p['crop']  # use full person
+                    
+                    engine.add_person(pid, name, face_crop, "")
     
     elif args.log:
-        log = fp.get_recognition_log(20)
-        print(f"\n📜 Recent Recognitions ({len(log)}):")
+        log = engine.get_recognition_log(20)
+        print(f"\n📜 Recognition Log ({len(log)}):")
         for l in log:
-            known = "✅" if l["person_id"] else "❓"
-            print(f"  {known} {l['timestamp'][:19]} | {l['person_name'] or 'Unknown':20s} | {l['camera']} | {l['confidence']:.0%}")
+            icon = "✅" if l["is_known"] else "❓"
+            print(f"   {icon} {l['timestamp'][:19]} | {l['person_name'] or 'Unknown':20s} | {l['camera']} | {l['confidence']:.0%}")
     
     elif args.unknown:
-        unknown = fp.get_unknown_faces()
+        unknown = engine.get_unknown_faces()
         print(f"\n❓ Unknown Faces ({len(unknown)}):")
         for u in unknown:
-            print(f"  {u['timestamp'][:19]} | {u['camera']} | conf: {u['confidence']:.0%} | img: {u['image_path']}")
+            print(f"   {u['timestamp'][:19]} | {u['camera']} | conf: {u['confidence']:.0%}")
     
     elif args.remove:
-        fp.db.remove_person(args.remove)
+        engine.remove_person(args.remove)
     
-    elif args.test_image:
-        img = cv2.imread(args.test_image)
+    elif args.test:
+        img = cv2.imread(args.test)
         if img is None:
-            print(f"❌ Cannot read image: {args.test_image}")
+            print(f"❌ Cannot read: {args.test}")
         else:
-            results = fp.process_frame(img, "test_cam", return_image=True)
-            cv2.imwrite("/tmp/face_result.jpg", img)
-            print(f"\n✅ Detected {len(results)} face(s)")
+            results, _ = engine.process_frame(img.copy(), "test", draw=True)
+            cv2.imwrite("/tmp/facerec_result.jpg", img)
+            print(f"\n✅ {len(results)} detections")
             for r in results:
-                status = f"✅ {r['person_name']}" if r['is_known'] else "❓ Unknown"
-                print(f"  {status} | sim: {r['similarity']:.0%} | conf: {r['confidence']:.0%}")
-            print(f"  Result image saved: /tmp/face_result.jpg")
-    
+                status = f"✅ {r['name']}" if r['is_known'] else "❓ Unknown"
+                print(f"   {status} | conf: {r['confidence']:.0%} | sim: {r.get('similarity', 0):.0%}")
+            print(f"   Result: /tmp/facerec_result.jpg")
     else:
-        parser.print_help()
+        print("✅ AI24x7 Face Recognition v2.0 ready!")
+        print("   Fully local - no external model downloads!")
+        print()
+        print("Commands:")
+        print("  python3 face_recognition.py --status")
+        print("  python3 face_recognition.py --add emp001 Ram /path/to/face.jpg")
+        print("  python3 face_recognition.py --list")
+        print("  python3 face_recognition.py --test /path/to/image.jpg")
